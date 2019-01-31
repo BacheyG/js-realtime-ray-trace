@@ -1,0 +1,6 @@
+		vec3 hit1 = e + t1 * d;
+		vec3 hit2 = e + t2 * d;
+		if (dot(B * hit1,hit1) > 0)
+			t1 = -1;
+		if	(dot( B * hit2,hit2) > 0)
+			t2 = -1;

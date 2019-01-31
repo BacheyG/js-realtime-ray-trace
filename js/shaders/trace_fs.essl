@@ -1,0 +1,193 @@
+Shader.source[document.currentScript.src.split('js/shaders/')[1]] = `
+	precision highp float;
+	uniform vec3 eye;
+	varying vec3 rayDir;
+	uniform vec4 colors[16];
+	uniform vec4 centers[16];
+	uniform vec4 modes[16];
+	uniform float passWeights[2];
+
+	uniform samplerCube background; 
+	
+	uniform vec3 ambientLight;
+	uniform vec4 lightPos[2];
+	uniform vec4 lightColor[2];
+	
+	float inverseLerp(float A, float B, float T) {
+		if (T < A) return 0.0;
+		if (T > B) return 1.0;
+		return (T - A) / (B - A);
+	}
+	
+	float interSectShape(vec4 mode, vec4 center, vec3 e, vec3 d)
+	{
+		//gomb
+		if (floor(mode.x + 0.5) == 1.0)
+		{
+			float t0, t1; // solutions for t if the ray intersects 
+			vec3 L = center.xyz - e.xyz;
+			float tca = dot(L, d.xyz);
+			// if (tca < 0) return 10000.0;
+			float d2 = dot(L, L) - tca * tca;
+			if (d2 > center.w) return 10000.0;
+			float thc = sqrt(center.w - d2);
+			t0 = tca - thc;
+			t1 = tca + thc; 
+			if (t0 > t1) {
+				t0 = t1;
+			}
+			if (t0 < 0.0) {
+				t0 = t1; // if t0 is negative, let's use t1 instead
+				if (t0 < 0.0) return 10000.0; // both t0 and t1 are negative
+			}
+			return t0;
+		}
+		//padlo
+		if (floor(mode.x + 0.5) == 5.0)
+		{
+			return -(dot(e, vec3(0, 1, 0)) + center.y) / dot(d, vec3(0, 1, 0));
+		} 
+		return 10000.0;
+	}
+	
+	vec3 getNormalForShape(vec3 hit, vec4 mode, vec3 center)
+	{
+		if (floor(mode.x + 0.5) == 1.0)
+		{
+			return normalize(hit - center);
+		} 
+		return vec3(0, 1, 0);
+	}
+	
+	vec3 shadowTrace(vec3 e, vec3 d, float maxD)
+	{		
+		for(int i = 0; i < 16; i++) {
+			float t = interSectShape(modes[i], centers[i], e, d);
+			if(t > 0.0 && t < maxD - 0.01) 
+			{
+				vec3 hit = e + d * t;
+				vec3 normal = getNormalForShape(hit, modes[i], centers[i].xyz);
+				if (floor(modes[i].y + 0.5) == 2.0)
+				{
+					return (1.0 - dot(normal, d)) * 2.0 - 2.2 * colors[i].rgb;
+				}
+				return min((1.0 - abs(dot(normal, d))) * colors[i].rgb * 2.0, vec3(1.0, 1.0, 1.0));
+			}
+		}
+		return vec3(1.0, 1.0, 1.0);
+	}
+	
+	vec3 getSurface(vec3 hit, vec3 normal, inout vec3 e, inout vec3 d, vec4 mode, inout bool inside, int pass,
+	inout vec4 contrib, vec4 bestColor)
+	{
+		contrib.rgb *= bestColor.rgb;
+		contrib.w *= bestColor.w;
+		if (floor(mode.y + 0.5) == 0.0)
+		{
+			vec3 planeResult = ambientLight;
+			float total = floor(hit.x) +
+						  floor(hit.z);					  
+			if (mod(total, 2.0) == 0.0)
+			{
+				planeResult = vec3(1.0, 1.0, 1.0);
+			}
+			float iT = inverseLerp(25.0, 50.0, distance(hit, e));
+			planeResult = vec3(0.6, 0.6, 0.6) * iT + planeResult * (1.0 - iT);	
+			vec3 lights = vec3(0.0, 0.0, 0.0);
+			for(int i = 0; i < 2; ++i)
+			{
+				//vec3 halfway = normalize((lightPos[i].rgb - hit) + d) * 2.0;
+				//float dp = dot(halfway, vec3(0.0, 1.0, 0.0));
+				//if (dp < 0.0) return ambientLight;
+				//float inten = pow(dp, 20.0);
+				//planeResult = max(planeResult * lightColor[i].rgb * lightColor[i].w * 0.00001,
+				//				  planeResult *	ambientLight);
+				vec3 lightDir = normalize(lightPos[i].xyz - hit);
+				float costheta = dot(normal, lightDir * lightPos[i].w);
+				vec3 multiplier = shadowTrace(hit + normal * 0.001, lightDir, distance(lightPos[i].xyz, hit));
+				lights += max(lightColor[i].rgb * lightColor[i].w * costheta * multiplier,
+								   ambientLight / 2.0);
+			}
+			return planeResult * lights;
+		}
+		else if (floor(mode.y + 0.5) == 1.0 ||
+				(floor(mode.y + 0.5) == 2.0 && pass > 0))
+		{
+			e = hit + normal * 0.001;
+			d = reflect(d, normal);
+			for(int i = 0; i < 2; ++i)
+			{
+				vec3 lightDir = normalize(lightPos[i].xyz - hit);
+				contrib.rgb += bestColor.rgb * pow(abs(dot(lightDir, normal)), 4.0);				
+			}
+		}
+		else if (floor(mode.y + 0.5) == 2.0)
+		{
+			float mul = inside ? -1.0 : 1.0;
+			float _ior = 0.75;
+			float IOR = inside ? 1.0 / _ior : _ior;
+			d = refract(d, normal * mul, IOR);
+			e = hit + d * 0.01;
+			for(int i = 0; i < 2; ++i)
+			{
+				vec3 lightDir = normalize(lightPos[i].xyz - hit);
+				if (!inside){
+					contrib.rgb += bestColor.rgb * pow(abs(dot(lightDir, normal)), 4.0);				
+				}
+			}
+			inside = !inside;
+		}		
+	}
+	
+	vec3 trace(inout vec3 e, inout vec3 d, inout vec4 contrib, inout bool inside, int pass)
+	{
+		float bestT = 10000.0;
+		vec4 bestCenter;
+		vec4 bestMode;
+		vec4 bestColor;
+		for(int i = 0; i < 16; i++) {
+			float t = interSectShape(modes[i], centers[i], e, d);
+			if(t > 0.0 && t < bestT) 
+			{
+				bestT = t;
+				bestColor = colors[i];
+				bestMode = modes[i];
+				bestCenter = centers[i];
+			}
+		}
+		if(bestT > 9999.0){
+			contrib.w = 0.0;
+			return textureCube(background, d.xyz).rgb * contrib.rgb; 	
+		}// háttér
+
+		vec3 hit = e + d * bestT;
+		vec3 normal = getNormalForShape(hit.xyz, bestMode, bestCenter.xyz);
+		
+		if (dot(e.xyz,normal) < 0.0)
+		{
+		//	normal = normal * -1.0;
+		}			
+		vec3 g = contrib.rgb * contrib.w;	
+		return getSurface(hit, normal, e, d, bestMode, inside, pass, contrib, bestColor) * g;
+	}
+	
+	void main() { 
+		vec4 outColor = vec4(0.0, 0.0, 0.0, 1.0);
+		const int passCount = 2;
+		for (int pass = 0; pass < passCount; ++pass)
+		{
+			vec3 d = normalize(rayDir);
+			vec3 e = eye;
+			bool inside = false;
+			vec4 contrib = vec4(1.0, 1.0, 1.0, 1.0);
+			for(int iReflection=0; iReflection < 4; ++iReflection)
+			{
+			  outColor.xyz += trace(e, d, contrib, inside, pass) * passWeights[pass];
+			  if(contrib.w < 0.05)
+				break;
+			}	
+		}
+		//outColor.xyz *= 1.0 / float(passCount);
+		gl_FragColor = outColor;	
+	} 
+`;
